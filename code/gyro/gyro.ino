@@ -31,5 +31,5 @@ void loop() {
   Serial.print("  Z: ");
   Serial.println(gyroZ, 2);
 
-  delay(10);
+  delay(500);
 }
