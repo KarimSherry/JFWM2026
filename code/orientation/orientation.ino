@@ -97,7 +97,7 @@ void loop() {
   // --------------------------------------------------
 
   Serial.print("Roll: ");
-  Serial.print(roll, 2);
+  Serial.print(roll, 0);
 
   Serial.print("  Pitch: ");
   Serial.print(pitch, 2);
