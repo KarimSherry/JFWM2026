@@ -1,22 +1,30 @@
-#include <SoftwareSerial.h>
 #include <Servo.h>
 #include <CheapStepper.h>
 
-// Keep Serial for the USB Serial Monitor.  The Seeed transmitter connects to
-// this Arduino's pin 2; pin 3 is unused here but required by SoftwareSerial.
-const byte DATA_RX_PIN = 2;
-const byte DATA_TX_PIN = 3;
+// Use the Uno's hardware UART (pin 0 / RX) for the Seeed data.  Unlike
+// SoftwareSerial, it does not disrupt the precisely timed Servo pulses.
 const unsigned long DATA_BAUD = 57600;
 
-SoftwareSerial dataSerial(DATA_RX_PIN, DATA_TX_PIN);
+// false: Serial Plotter output (only the servo target angle as a number).
+// true:  human-readable diagnostics in the Serial Monitor.
+const bool DEBUG_SERIAL = false;
 
-const byte SERVO_PIN = 6;
+const byte SERVO_PIN = 5;
 const int SERVO_OPEN_ANGLE = 0;
 const int SERVO_CLOSE_ANGLE = 20;
+
+// Servo.write() is already called only on a state change.  The Servo library
+// nevertheless keeps producing holding pulses.  Set this true to stop those
+// pulses after the servo has reached its requested position.
+const bool DETACH_SERVO_AFTER_MOVE = false;
+const unsigned long SERVO_SETTLE_MS = 500;
 
 Servo stateServo;
 bool isClosed = true;
 bool previousContraction = false;
+int servoTargetAngle = SERVO_CLOSE_ANGLE;
+bool servoAttached = false;
+unsigned long servoDetachTime = 0;
 
 // CheapStepper uses Arduino pins 8, 9, 10 and 11 by default (ULN2003
 // IN1..IN4).  These pins do not conflict with the serial receiver or servo.
@@ -68,15 +76,31 @@ void toggleServoState()
 {
   isClosed = !isClosed;
 
+  if (!servoAttached)
+  {
+    stateServo.attach(SERVO_PIN);
+    servoAttached = true;
+  }
+
   if (isClosed)
   {
-    stateServo.write(SERVO_CLOSE_ANGLE);
-    Serial.println("Servo: closed");
+    servoTargetAngle = SERVO_CLOSE_ANGLE;
   }
   else
   {
-    stateServo.write(SERVO_OPEN_ANGLE);
-    Serial.println("Servo: open");
+    servoTargetAngle = SERVO_OPEN_ANGLE;
+  }
+
+  stateServo.write(servoTargetAngle);
+
+  if (DETACH_SERVO_AFTER_MOVE)
+    servoDetachTime = millis() + SERVO_SETTLE_MS;
+
+  if (DEBUG_SERIAL)
+  {
+    Serial.print("Servo: ");
+    Serial.print(isClosed ? "closed, target: " : "open, target: ");
+    Serial.println(servoTargetAngle);
   }
 }
 
@@ -104,13 +128,18 @@ bool parsePacket(char *packet)
 
 void setup()
 {
-  Serial.begin(115200);
-  dataSerial.begin(DATA_BAUD);
+  // Serial is both the hardware-UART input from the Seeed and the USB output
+  // for Serial Monitor/Plotter.  Set the Monitor/Plotter to 57600 baud.
+  Serial.begin(DATA_BAUD);
   stateServo.attach(SERVO_PIN);
-  stateServo.write(SERVO_CLOSE_ANGLE);
+  servoAttached = true;
+  stateServo.write(servoTargetAngle);
+  if (DETACH_SERVO_AFTER_MOVE)
+    servoDetachTime = millis() + SERVO_SETTLE_MS;
   stepper.setRpm(STEPPER_RPM);
 
-  Serial.println("Arduino receiver ready; initial state: closed.");
+  if (DEBUG_SERIAL)
+    Serial.println("Arduino receiver ready; initial state: closed.");
 }
 
 void loop()
@@ -118,11 +147,18 @@ void loop()
   static char packet[16];
   static byte packetLength = 0;
 
+  if (DETACH_SERVO_AFTER_MOVE && servoAttached &&
+      (long)(millis() - servoDetachTime) >= 0)
+  {
+    stateServo.detach();
+    servoAttached = false;
+  }
+
   runStepper();
 
-  while (dataSerial.available() > 0)
+  while (Serial.available() > 0)
   {
-    char received = dataSerial.read();
+    char received = Serial.read();
 
     if (received == '\r')
       continue;
@@ -139,10 +175,27 @@ void loop()
           toggleServoState();
 
         previousContraction = contraction;
+
+        if (DEBUG_SERIAL)
+        {
+          Serial.print("Contraction: ");
+          Serial.print(contraction ? 1 : 0);
+          Serial.print(", Roll: ");
+          Serial.print(rollAngle);
+          Serial.print(", Servo target: ");
+          Serial.println(servoTargetAngle);
+        }
+        else
+        {
+          // A bare number on every line is directly compatible with Serial
+          // Plotter and represents the target last sent to the servo.
+          Serial.println(servoTargetAngle);
+        }
       }
       else
       {
-        Serial.println("Invalid packet received.");
+        if (DEBUG_SERIAL)
+          Serial.println("Invalid packet received.");
       }
 
       packetLength = 0;
